@@ -1,0 +1,4 @@
+run,n,u,n_bits,hash_k,degree,set_size,overlap,backend,total_s,sigma,expected_intersection_size,found_intersection_size,false_positives,false_negatives,match
+0,2,4,128,3,8192,6,2,bfv+pasta3-alt,54.120365,3,2,2,0,0,true
+1,2,4,128,3,8192,6,2,bfv+pasta3-alt,46.057408,3,2,2,0,0,true
+2,2,4,128,3,8192,6,2,bfv+pasta3-alt,44.434489,3,2,2,0,0,true

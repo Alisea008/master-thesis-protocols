@@ -1,0 +1,22 @@
+[package]
+name = "psi-pmi"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+transieve = { path = "../Transieve-main", features = ["bfv"] }
+fhe = "0.1.1"
+fhe-traits = "0.1"
+bincode = "1"
+anyhow = "1"
+
+curve25519-dalek = { version = "4", features = ["rand_core"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha3 = "0.10"
+rand = "0.8"
+rand_core = "0.6"
+zeroize = { version = "1", features = ["derive"] }
+thiserror = "1"
+chacha20poly1305 = "0.10"
+hex = "0.4"

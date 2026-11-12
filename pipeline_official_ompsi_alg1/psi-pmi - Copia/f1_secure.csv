@@ -1,0 +1,2 @@
+run,n,u,n_bits,hash_k,degree,set_size,overlap,backend,total_s,fhe_setup_s,pack_key_s,sim_enc_s,ot_s,transcipher_s,eval_and_s,tee_s,ct_size_bytes,m_sigma_len,comm_total_bytes,expected_intersection_size,found_intersection_size,false_positives,false_negatives,match
+0,2,4,128,3,secure,10,3,bfv+pasta3,602.947428,119.724714,0.660698,1.252774,0.017405,477.322466,2.760851,0.622329,5734436,1024,17211932,3,3,0,0,true

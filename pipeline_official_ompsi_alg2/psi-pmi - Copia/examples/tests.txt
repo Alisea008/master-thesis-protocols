@@ -1,0 +1,17 @@
+# default (n=2, u=4, n_bits=128, hash_k=3, set_size=6, 3 run)
+cargo run --release --example bench_e2e_alt
+
+# più run, CSV separato
+cargo run --release --example bench_e2e_alt -- \
+  --n 2 --u 4 --n-bits 128 --hash-k 3 --set-size 6 \
+  --runs 5 --out bench_alg2.csv
+
+# sweep su n (attenzione al vincolo su set_size)
+cargo run --release --example bench_e2e_alt -- \
+  --n 3 --u 4 --n-bits 128 --hash-k 2 --set-size 9 \
+  --runs 3 --out bench_alg2.csv --append
+
+# configurazioni valide più grandi (hash_k=2, n_bits piccolo)
+cargo run --release --example bench_e2e_alt -- \
+  --n 2 --u 4 --n-bits 32 --hash-k 2 --set-size 12 \
+  --runs 3 --out bench_alg2.csv

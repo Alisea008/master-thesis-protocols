@@ -1,0 +1,4 @@
+run,n,u,n_bits,hash_k,degree,set_size,overlap,backend,total_s,fhe_setup_s,pack_key_s,sim_enc_s,ot_s,transcipher_s,eval_and_s,tee_s,ct_size_bytes,m_sigma_len,comm_total_bytes,expected_intersection_size,found_intersection_size,false_positives,false_negatives,match
+0,4,4,128,3,8192,10,3,bfv+pasta3,51.243466,17.147486,0.102829,0.799402,0.095839,32.373417,0.549120,0.063303,1536030,1024,7697398,3,3,0,0,true
+1,4,4,128,3,8192,10,3,bfv+pasta3,50.546996,14.989547,0.072257,0.478327,0.003135,34.500091,0.431134,0.050345,1536030,1024,7697398,3,3,0,0,true
+2,4,4,128,3,8192,10,3,bfv+pasta3,47.687148,13.942494,0.101404,0.648358,0.002828,32.410658,0.509273,0.049646,1536030,1024,7697398,3,3,0,0,true
