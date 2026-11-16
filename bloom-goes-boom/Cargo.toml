@@ -1,0 +1,33 @@
+[package]
+name = "bloom-goes-boom"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bloom_goes_boom"
+path = "src/lib.rs"
+
+[[bin]]
+name = "attack"
+path = "src/bin/attack.rs"
+
+[[bin]]
+name = "attack_single"
+path = "src/bin/attack_single.rs"
+
+[[bin]]
+name = "plausible_deniability"
+path = "src/bin/plausible_deniability.rs"
+
+[dependencies]
+xxh3 = "0.1"
+bytevec = "0.2"
+topk = "0.5"
+rand = "0.8"
+num_cpus = "1.16"
+structopt = "0.3"
+rayon = "1.10.0"
+fftw = "0.8.0"
+num = "0.4"
+num-bigint = "0.4"
+cached = "0.54"
