@@ -1,4 +1,4 @@
-//! Orchestrazione end-to-end (Algorithm 2).
+//! Orchestrazione end-to-end (Algorithm 2) — multi-block.
 
 use std::collections::HashSet;
 use std::time::Instant;
@@ -24,11 +24,8 @@ pub struct DataOwnerInput {
 
 impl Drop for DataOwnerInput {
     fn drop(&mut self) {
-        // A3: wipe the symmetric key (and inputs) on drop.
         self.k_sym.zeroize();
-        for e in &mut self.elements {
-            e.zeroize();
-        }
+        for e in &mut self.elements { e.zeroize(); }
     }
 }
 
@@ -53,6 +50,8 @@ pub struct E2eTimings {
 
 #[derive(Default, Clone)]
 pub struct E2eCommCost {
+    pub num_blocks: usize,
+    pub block_size_bytes: usize,
     pub ct_size_bytes: usize,
     pub m_sigma_len: usize,
     pub do_to_ttp_bytes_per_party: usize,
@@ -84,18 +83,22 @@ pub fn run_e2e_pasta(
 ) -> Result<E2eResult> {
     let n = do_inputs.len();
     assert!(n >= 2, "at least 2 data owners (n>=2)");
-    assert!(cfg.n_bits <= params.t, "filter must fit in one lane");
+
+    // NEW: multi-block. n_bits può superare params.t.
+    let num_blocks = (cfg.n_bits + params.t - 1) / params.t;
+    let block_size = params.t * 8; // 1024 B per PASTA3
 
     let t_run = Instant::now();
     eprintln!(
-        "[psi] === E2E start === n={} U={} n_bits={} hash_k={} Pasta_t={} Pasta_rounds={} force_degree={:?}",
-        n, cfg.u, cfg.n_bits, cfg.hash_k, params.t, params.rounds, force_degree
+        "[psi] === E2E start === n={} U={} n_bits={} ({} block{}) hash_k={} Pasta_t={} force_degree={:?}",
+        n, cfg.u, cfg.n_bits, num_blocks,
+        if num_blocks == 1 { "" } else { "s" },
+        cfg.hash_k, params.t, force_degree
     );
 
     let hashes = HashFamilies::new(cfg.seeds.clone(), cfg.hash_k);
     let sid = fresh_sid();
 
-    // --- signing keys ---
     let t_sig = Instant::now();
     let ttp = Ttp::new();
     let ttp_vk = ttp.signer.verifying_key_bytes();
@@ -103,7 +106,6 @@ pub fn run_e2e_pasta(
         Ed25519Verifier::from_bytes(&ttp_vk)
             .ok_or_else(|| Error::Crypto("bad TTP verifying key".into()))?,
     );
-    // A4: a second, independent verifier for S_a to check Σ_TTP(sid, T_a).
     let ttp_verifier_sa = Ed25519Verifier::from_bytes(&ttp_vk)
         .ok_or_else(|| Error::Crypto("bad TTP verifying key (S_a)".into()))?;
 
@@ -118,22 +120,17 @@ pub fn run_e2e_pasta(
         t_sig.elapsed().as_secs_f64() * 1e3
     );
 
-    // --- FHE setup ---
     let sop_levels = (n as f64).log2().ceil() as usize;
-    let fhe = TransievePasta {
-        params,
-        force_degree,
-    };
+    let fhe = TransievePasta { params, force_degree };
 
     let t0 = Instant::now();
     let ctx = fhe.setup(sop_levels)?;
     let t_fhe_setup = t0.elapsed().as_secs_f64();
     eprintln!(
-        "[psi] [fhe setup]   PastaBfv::new (keygen + eval keys, sop_levels={}): {:.3} s",
+        "[psi] [fhe setup]   PastaBfv::new (sop_levels={}): {:.3} s",
         sop_levels, t_fhe_setup
     );
 
-    // --- pack_key per DO ---
     let t0 = Instant::now();
     let per_do_keys: Vec<_> = do_inputs
         .iter()
@@ -142,11 +139,12 @@ pub fn run_e2e_pasta(
     let t_pack_key = t0.elapsed().as_secs_f64();
     eprintln!(
         "[psi] [pack_key]    encrypt_key for n={} DOs: {:.3} ms",
-        n,
-        t_pack_key * 1e3
+        n, t_pack_key * 1e3
     );
 
-    // --- SIM ciphertexts: U filtri per DO ---
+    // NEW: SIM encryption multi-block. Ogni (DO, hash_family) produce
+    // `num_blocks` ciphertext SIM, concatenati in un unico Vec<u8> per
+    // essere trasportati dall'OT (che è size-agnostic).
     let t0 = Instant::now();
     let u = hashes.len();
     let mut per_do_messages: Vec<Vec<Vec<u8>>> = Vec::with_capacity(n);
@@ -161,21 +159,22 @@ pub fn run_e2e_pasta(
                 }
             }
             let nonce = [hu as u64, 0u64];
-            let ct = pasta_sim::enc(&bits, &do_in.k_sym, nonce, params);
-            m_sigma_len = m_sigma_len.max(ct.len());
-            msgs.push(ct);
+            let blocks = pasta_sim::enc_blocks(&bits, &do_in.k_sym, nonce, params);
+            debug_assert_eq!(blocks.len(), num_blocks);
+            let mut ct_concat = Vec::with_capacity(num_blocks * block_size);
+            for b in blocks { ct_concat.extend_from_slice(&b); }
+            m_sigma_len = m_sigma_len.max(ct_concat.len());
+            msgs.push(ct_concat);
         }
         per_do_messages.push(msgs);
     }
     let t_sim_enc = t0.elapsed().as_secs_f64();
     eprintln!(
-        "[psi] [SIM enc]     {} filters x {} DOs: {:.3} ms",
-        u,
-        n,
-        t_sim_enc * 1e3
+        "[psi] [SIM enc]     {} filters x {} DOs x {} blocks: {:.3} ms ({:.1} MB/DO)",
+        u, n, num_blocks, t_sim_enc * 1e3,
+        (m_sigma_len as f64) / (1024.0 * 1024.0)
     );
 
-    // --- TEE: host input da DO_1 ---
     let d1_prime: Vec<Vec<u8>> = do_inputs[0]
         .elements
         .iter()
@@ -189,7 +188,6 @@ pub fn run_e2e_pasta(
         k_sym: do_inputs[0].k_sym.clone(),
     })?;
 
-    // --- OT (Algorithm 1) con σ comune + verifica di T (A4) ---
     let t0 = Instant::now();
     let mut rng = rand::thread_rng();
 
@@ -209,13 +207,11 @@ pub fn run_e2e_pasta(
 
     let mut m_sigmas: Vec<Vec<u8>> = Vec::with_capacity(n);
     for a in 0..n {
-        // A4: TTP signs T_a; S_a verifies the signature before using T_a.
         let t_signed = t_msg(&sid, &ttp_outs[a].t);
         let sig_t = ttp.signer.sign(&t_signed);
         if !ttp_verifier_sa.verify(&t_signed, &sig_t) {
             return Err(Error::Crypto(format!(
-                "bad TTP signature on T for DO_{}",
-                a + 1
+                "bad TTP signature on T for DO_{}", a + 1
             )));
         }
         let cts = ot_phase3(&states[a], &ttp_outs[a].pk0_bytes, &per_do_messages[a])?;
@@ -224,37 +220,47 @@ pub fn run_e2e_pasta(
     }
     let t_ot = t0.elapsed().as_secs_f64();
     eprintln!(
-        "[psi] [OT]          n={} U={} sigma={}: {:.3} ms",
-        n,
-        u,
-        sigma,
-        t_ot * 1e3
+        "[psi] [OT]          n={} U={} sigma={} m_sigma={} B: {:.3} ms",
+        n, u, sigma, m_sigmas[0].len(), t_ot * 1e3
     );
 
     let sig_sigma = ttp.signer.sign(&sigma_msg(&sid, sigma));
     tee.register_sigma(sigma, &sigma_msg(&sid, sigma), &sig_sigma)?;
 
-    // --- S_a: transcipher ---
+    // NEW: transcipher multi-block. Per ogni DO, splittiamo m_sigma in
+    // `num_blocks` blocchi da `block_size` byte, ognuno convertito in
+    // `t` parole, e passiamo `blocks = [0, 1, ..., num_blocks-1]`.
     let nonce = [sigma as u64, 0u64];
+    let block_ids: Vec<u64> = (0..num_blocks as u64).collect();
     let mut e_a_vec = Vec::with_capacity(n);
     let t0 = Instant::now();
     for a in 0..n {
-        let words = pasta_sim::bytes_to_words(&m_sigmas[a]);
-        let len = words.len();
-        let ct = tee
-            .fhe()
-            .transcipher(tee.ctx(), &per_do_keys[a], nonce, &[0], &[words])?;
+        let m = &m_sigmas[a];
+        let mut cipher_words_blocks: Vec<Vec<u64>> = Vec::with_capacity(num_blocks);
+        for b in 0..num_blocks {
+            let start = b * block_size;
+            let end = (start + block_size).min(m.len());
+            cipher_words_blocks.push(pasta_sim::bytes_to_words(&m[start..end]));
+        }
+        let ct = tee.fhe().transcipher(
+            tee.ctx(),
+            &per_do_keys[a],
+            nonce,
+            &block_ids,
+            &cipher_words_blocks,
+        )?;
         eprintln!(
-            "[psi] [transcipher] DO_{} ({} cipher words): {:.3} s",
+            "[psi] [transcipher] DO_{} ({} blocks × {} words = {} B): {:.3} s",
             a + 1,
-            len,
+            num_blocks,
+            params.t,
+            m.len(),
             t0.elapsed().as_secs_f64()
         );
         e_a_vec.push(ct);
     }
     let t_transcipher = t0.elapsed().as_secs_f64();
 
-    // --- S1: AND slot-wise ---
     let t0 = Instant::now();
     let e_b = tee.fhe().eval_and_all(tee.ctx(), &e_a_vec, n)?;
     let t_eval_and = t0.elapsed().as_secs_f64();
@@ -263,13 +269,11 @@ pub fn run_e2e_pasta(
         n, t_eval_and
     );
 
-    // A6: measure ciphertext size from the wire type (used for comm cost).
     let ct_size_bytes = {
         use fhe_traits::Serialize as FheSerialize;
         e_b.to_bytes().len()
     };
 
-    // --- S1 firma Eval (fingerprint), TEE verifica+decifra+finish ---
     let t0 = Instant::now();
     let fp = ct_fingerprint(&e_b);
     let signed_msg = eval_msg(&sid, &fp);
@@ -277,13 +281,10 @@ pub fn run_e2e_pasta(
     let out = tee.process_eval(&sid, &e_b, &sig_eval, cfg.n_bits)?;
     let t_tee = t0.elapsed().as_secs_f64();
     eprintln!(
-        "[psi] [TEE]         |D1'|={} tokens in {:.3} ms (used sid count: {})",
-        out.len(),
-        t_tee * 1e3,
-        tee.used_sid_count()
+        "[psi] [TEE]         |D1'|={} tokens in {:.3} ms",
+        out.len(), t_tee * 1e3
     );
 
-    // --- A2: ground truth at n>2 (intersection across ALL DOs) ---
     let all_sets: Vec<HashSet<_>> = do_inputs
         .iter()
         .map(|d| d.elements.iter().cloned().collect())
@@ -295,7 +296,6 @@ pub fn run_e2e_pasta(
         .cloned()
         .collect();
 
-    // --- A5: observed intersection + FP/FN ---
     let found: Vec<Vec<u8>> = out
         .iter()
         .filter(|(_, tok)| *tok != [0u8; 32])
@@ -307,13 +307,13 @@ pub fn run_e2e_pasta(
     let false_positives = found_set.difference(&expected_set).count();
     let false_negatives = expected_set.difference(&found_set).count();
 
-    // --- A6: analytical communication cost ---
-    let do_to_ttp = (u - 1) * 32 + 32;    // U-1 Ristretto points + g^r
-    let ttp_to_do = 32;                    // pk0
-    let ttp_to_s = 32;                     // T
-    let do_to_s = u * (m_sigma_len + 6);   // U SIM ciphertexts + 48-bit tag
-    let s_to_s1 = ct_size_bytes;           // one transciphered ct per S_a
-    let s1_to_tee = ct_size_bytes;         // E_B
+    // Comm cost multi-block
+    let do_to_ttp = (u - 1) * 32 + 32;
+    let ttp_to_do = 32;
+    let ttp_to_s = 32;
+    let do_to_s = u * (m_sigma_len + 6);
+    let s_to_s1 = ct_size_bytes;
+    let s1_to_tee = ct_size_bytes;
     let total_bytes = n * do_to_ttp
         + n * ttp_to_do
         + n * ttp_to_s
@@ -321,6 +321,8 @@ pub fn run_e2e_pasta(
         + n * s_to_s1
         + s1_to_tee;
     let comm = E2eCommCost {
+        num_blocks,
+        block_size_bytes: block_size,
         ct_size_bytes,
         m_sigma_len,
         do_to_ttp_bytes_per_party: do_to_ttp,
@@ -345,24 +347,18 @@ pub fn run_e2e_pasta(
     };
 
     eprintln!(
-        "[psi] === E2E done in {:.3} s | sigma={} | |expected|={} | |found|={} | FP={} | FN={} ===",
-        total_s,
+        "[psi] === E2E done in {:.3} s | n_bits={} ({} block{}) | sigma={} | |exp|={} | |found|={} | FP={} | FN={} ===",
+        total_s, cfg.n_bits, num_blocks,
+        if num_blocks == 1 { "" } else { "s" },
         sigma,
-        expected.len(),
-        found.len(),
-        false_positives,
-        false_negatives
+        expected.len(), found.len(), false_positives, false_negatives
     );
 
     Ok(E2eResult {
-        sid,
-        sigma,
-        do1_out: out,
+        sid, sigma, do1_out: out,
         expected_intersection: expected,
         found_intersection: found,
-        false_positives,
-        false_negatives,
-        timings,
-        comm,
+        false_positives, false_negatives,
+        timings, comm,
     })
 }
