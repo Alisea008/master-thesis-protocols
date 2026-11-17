@@ -47,14 +47,12 @@ pub fn dec_with_nonce(key: &[u8], input: &[u8]) -> Option<Vec<u8>> {
 }
 
 // -------------------------------------------------------------------------
-// SIM "Pasta-shaped" usata dal transcipher. È lo stream cipher di Pasta
-// (mod P = 65537) con chiave derivata da k_sym via SHAKE256.
+// SIM "Pasta-shaped" usata dal transcipher (stream cipher Pasta, mod P).
 // -------------------------------------------------------------------------
 
 use transieve::cipher::bfv::pasta::{encrypt as pasta_encrypt, P};
 
-/// Deriva 2t field element mod P da k_sym. STESSA derivazione usata da
-/// pasta_fhe::pack_key, così il transcipher decifra davvero con la stessa chiave.
+/// Deriva 2t field element mod P da k_sym (stessa derivazione in `pack_key`).
 pub fn derive_pasta_key(k_sym: &[u8], t: usize) -> Vec<u64> {
     use sha3::digest::{ExtendableOutput, Update, XofReader};
     use sha3::Shake256;
@@ -83,28 +81,43 @@ pub mod pasta_sim {
         let ct = pasta_encrypt(&key, &msg, nonce, params);
         words_to_bytes(&ct)
     }
-    
-        pub fn enc_indices(
-            indices: &[usize],
-            bits_per_idx: usize,
-            k_sym: &[u8],
-            nonce: [u64; 2],
-            params: PastaParams,
-        ) -> Vec<u8> {
-            let mut bits = Vec::with_capacity(indices.len() * bits_per_idx);
-            for &idx in indices {
-                for k in 0..bits_per_idx {
-                    bits.push(((idx >> k) & 1) as u8);
-                }
+
+    /// Cifra `bits` in N blocchi da `params.t`. Nonce per blocco:
+    /// `[nonce_base[0], nonce_base[1] + block_idx]`.
+    pub fn enc_multi_block(
+        bits: &[u8],
+        k_sym: &[u8],
+        nonce_base: [u64; 2],
+        params: PastaParams,
+    ) -> Vec<Vec<u8>> {
+        let t = params.t;
+        let n = (bits.len() + t - 1) / t;
+        (0..n)
+            .map(|b| {
+                let start = b * t;
+                let end = (start + t).min(bits.len());
+                let nonce = [nonce_base[0], nonce_base[1] + b as u64];
+                enc(&bits[start..end], k_sym, nonce, params)
+            })
+            .collect()
+    }
+
+    /// Cifra una lista di indici come bit (bits_per_idx per indice) in multi-block.
+    pub fn enc_indices_multi_block(
+        indices: &[usize],
+        bits_per_idx: usize,
+        k_sym: &[u8],
+        nonce_base: [u64; 2],
+        params: PastaParams,
+    ) -> Vec<Vec<u8>> {
+        let mut bits = Vec::with_capacity(indices.len() * bits_per_idx);
+        for &idx in indices {
+            for k in 0..bits_per_idx {
+                bits.push(((idx >> k) & 1) as u8);
             }
-            assert!(
-                bits.len() <= params.t,
-                "indices bit-encoding ({} bits) exceeds params.t ({})",
-                bits.len(),
-                params.t
-            );
-            enc(&bits, k_sym, nonce, params)
         }
+        enc_multi_block(&bits, k_sym, nonce_base, params)
+    }
 
     pub fn words_to_bytes(words: &[u64]) -> Vec<u8> {
         let mut out = Vec::with_capacity(words.len() * 8);
