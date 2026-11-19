@@ -79,8 +79,15 @@ impl PastaFhe for TransievePasta {
     }
 
     fn decrypt_bits(&self, ctx: &Self::Ctx, ct: &Self::Ct, num_bits: usize) -> Result<Vec<bool>> {
-        ctx.decrypt_bits(ct, num_bits)
-    }
+    let t = self.params.t;
+    let mut lens = vec![t; num_bits / t];
+    if num_bits % t != 0 { lens.push(num_bits % t); }
+    anyhow::ensure!(
+        lens.len() <= ctx.lanes(),
+        "{} blocchi > {} lanes: servono più ciphertext", lens.len(), ctx.lanes()
+    );
+    ctx.decrypt_lane_bits(ct, &lens)
+}
 }
 
 // -------------------------------------------------------------------------
@@ -101,6 +108,24 @@ pub fn ct_fingerprint(ct: &Ciphertext) -> Vec<u8> {
     h.update(b"PSI-PMI/Eval/ct-fingerprint/v1");
     h.update(&(bytes.len() as u64).to_le_bytes());
     h.update(&bytes);
+    let mut r = h.finalize_xof();
+    let mut out = vec![0u8; 32];
+    r.read(&mut out);
+    out
+}
+
+/// Fingerprint di una sequenza ordinata di ciphertext (uno per gruppo di lane).
+pub fn ct_fingerprint_multi(cts: &[Ciphertext]) -> Vec<u8> {
+    use sha3::{
+        digest::{ExtendableOutput, Update, XofReader},
+        Shake256,
+    };
+    let mut h = Shake256::default();
+    h.update(b"PSI-PMI/Eval/ct-fingerprint-multi/v1");
+    h.update(&(cts.len() as u64).to_le_bytes());
+    for ct in cts {
+        h.update(&ct_fingerprint(ct));
+    }
     let mut r = h.finalize_xof();
     let mut out = vec![0u8; 32];
     r.read(&mut out);
