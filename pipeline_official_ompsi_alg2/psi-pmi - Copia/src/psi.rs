@@ -1,4 +1,4 @@
-//! Orchestrazione end-to-end Algorithm 2 (senza TEE, CMUX simulato, multi-block).
+//! End-to-end orchestration of Algorithm 2 (no TEE, simulated CMUX, multi-block).
 
 use std::collections::HashSet;
 use std::time::Instant;
@@ -17,11 +17,13 @@ use crate::{Error, Result};
 
 use transieve::cipher::bfv::pasta::PastaParams;
 
+// Input provided by a single data owner: elements and symmetric key
 pub struct DataOwnerInput {
     pub elements: Vec<Vec<u8>>,
     pub k_sym: Vec<u8>,
 }
 
+// Securely zeroize sensitive material when the input is dropped
 impl Drop for DataOwnerInput {
     fn drop(&mut self) {
         self.k_sym.zeroize();
@@ -31,6 +33,7 @@ impl Drop for DataOwnerInput {
     }
 }
 
+// End-to-end run configuration
 pub struct E2eConfig {
     pub u: usize,
     pub n_bits: usize,
@@ -38,6 +41,7 @@ pub struct E2eConfig {
     pub seeds: Vec<[u8; 32]>,
 }
 
+// Result of the end-to-end run, including timing metrics
 pub struct E2eResultAlt {
     pub sid: Sid,
     pub sigma: usize,
@@ -60,8 +64,8 @@ pub struct E2eResultAlt {
     pub cmux_sim_s: f64,
 }
 
-/// Esegue Algorithm "Alternative" in modalità multi-block: nessun TEE, S_1
-/// fa il membership test via CMUX (simulato, vedi NOTES.md).
+/// Runs the "Alternative" algorithm in multi-block mode: no TEE, S_1
+/// performs the membership test via CMUX (simulated, see NOTES.md).
 pub fn run_e2e_pasta_alt(
     params: PastaParams,
     force_degree: Option<usize>,
@@ -73,15 +77,19 @@ pub fn run_e2e_pasta_alt(
 
     let t_run = Instant::now();
     let t = params.t;
+    // Byte size of a single Pasta block (t words of 8 bytes each)
     let block_bytes = t * 8;
     let hashes = HashFamilies::new(cfg.seeds.clone(), cfg.hash_k);
     let sid = fresh_sid();
     let u = hashes.len();
     let h = cfg.hash_k;
     let m1 = do_inputs[0].elements.len();
+    // Number of bits needed to encode an index into the filter
     let bits_per_idx = ((cfg.n_bits as f64).log2().ceil() as usize).max(1);
+    // Number of Pasta blocks needed to hold the whole filter
     let n_b = (cfg.n_bits + t - 1) / t;
     let idx_bits_total = m1 * h * bits_per_idx;
+    // Number of Pasta blocks needed to hold all index bits
     let n_a = (idx_bits_total + t - 1) / t;
 
     eprintln!(
@@ -94,6 +102,7 @@ pub fn run_e2e_pasta_alt(
     );
 
     // --- FHE setup ---
+    // SOP depth: ceil(log2(n)) levels are needed for the n-way AND
     let sop_levels = (n as f64).log2().ceil() as usize;
     let fhe = TransievePasta { params, force_degree };
     let t_setup = Instant::now();
@@ -108,6 +117,7 @@ pub fn run_e2e_pasta_alt(
         .ok_or_else(|| Error::Crypto("bad TTP verifying key".into()))?;
 
     // --- pack_key ---
+    // Each DO's symmetric key is packed into an FHE-encrypted key ciphertext
     let t0 = Instant::now();
     let per_do_keys: Vec<_> = do_inputs
         .iter()
@@ -116,19 +126,21 @@ pub fn run_e2e_pasta_alt(
     let t_pack_key = t0.elapsed().as_secs_f64();
     eprintln!("[psi-alt] [pack_key] {:.3} ms", t_pack_key * 1e3);
 
-    // --- SIM: filtri multi-block + matrice indici multi-block ---
+    // --- SIM: multi-block filters + multi-block index matrix ---
     let t0 = Instant::now();
-    // per_do_messages[a][hu] = Vec<blocks>  (concatenati in un unico messaggio OT)
+    // per_do_messages[a][hu] = Vec<blocks> (concatenated into a single OT message)
     let mut per_do_messages: Vec<Vec<Vec<u8>>> = Vec::with_capacity(n);
     for do_in in &do_inputs {
         let mut msgs: Vec<Vec<u8>> = Vec::with_capacity(u);
         for hu in 0..u {
+            // Build the Bloom filter bit vector for hash family `hu`
             let mut bits = vec![0u8; cfg.n_bits];
             for x in &do_in.elements {
                 for p in hashes.get(hu).positions(x, cfg.n_bits) {
                     bits[p] = 1;
                 }
             }
+            // Encrypt the filter in multi-block Pasta SIM mode
             let blocks = pasta_sim::enc_multi_block(&bits, &do_in.k_sym, [hu as u64, 0], params);
             let concat: Vec<u8> = blocks.iter().flat_map(|b| b.iter().copied()).collect();
             msgs.push(concat);
@@ -136,7 +148,7 @@ pub fn run_e2e_pasta_alt(
         per_do_messages.push(msgs);
     }
 
-    // Matrice indici (solo DO_1): namespace separato (u + hu) per il nonce
+    // Index matrix (only DO_1): separate namespace (u + hu) for the nonce
     let mut do1_index_messages: Vec<Vec<u8>> = Vec::with_capacity(u);
     for hu in 0..u {
         let mut all_indices: Vec<usize> = Vec::with_capacity(m1 * h);
@@ -161,104 +173,124 @@ pub fn run_e2e_pasta_alt(
         u, u, t_sim_enc * 1e3
     );
 
-    // --- OT filtri (n istanze) + OT indici (1 istanza), stesso σ ---
+    // --- Filter OT (n instances) + Index OT (1 instance), same σ ---
     let t0 = Instant::now();
     let mut rng = rand::thread_rng();
     let mut filter_states = Vec::with_capacity(n);
     let mut filter_p1s = Vec::with_capacity(n);
+    // Phase 1 for every DO's filter OT instance
     for _ in 0..n {
         let (st, p1) = ot_phase1(u, &mut rng);
         filter_states.push(st);
         filter_p1s.push(p1);
     }
+    // Phase 2 for the first DO establishes the shared σ
     let ttp1 = ot_phase2(u, &filter_p1s[0], &mut rng)?;
     let sigma = ttp1.sigma;
     let mut filter_ttp_outs = vec![ttp1];
+    // Subsequent DOs reuse the same σ
     for a in 1..n {
         filter_ttp_outs.push(ot_phase2_with_sigma(u, &filter_p1s[a], sigma, &mut rng)?);
     }
+    // Index OT instance, also bound to the same σ
     let (idx_state, idx_p1) = ot_phase1(u, &mut rng);
     let idx_ttp_out = ot_phase2_with_sigma(u, &idx_p1, sigma, &mut rng)?;
 
+    // Phase 3 + 4 for each DO's filter OT
     let mut m_sigmas: Vec<Vec<u8>> = Vec::with_capacity(n);
     for a in 0..n {
         let cts = ot_phase3(&filter_states[a], &filter_ttp_outs[a].pk0_bytes, &per_do_messages[a])?;
         let (_j, m_sigma) = ot_phase4(&filter_ttp_outs[a].t, &cts)?;
         m_sigmas.push(m_sigma);
     }
+    // Phase 3 + 4 for the index OT
     let idx_cts = ot_phase3(&idx_state, &idx_ttp_out.pk0_bytes, &do1_index_messages)?;
     let (_j, m_a_sigma) = ot_phase4(&idx_ttp_out.t, &idx_cts)?;
     let t_ot = t0.elapsed().as_secs_f64();
     eprintln!("[psi-alt] [OT] σ={} n_b={} n_a={}: {:.3} ms", sigma, n_b, n_a, t_ot * 1e3);
 
-    // --- TTP firma σ (autenticazione tra server) ---
+    // --- TTP signs σ (server-to-server authentication) ---
     let sig_sigma = ttp.signer.sign(&sigma_msg(&sid, sigma));
     if !ttp_verifier.verify(&sigma_msg(&sid, sigma), &sig_sigma) {
         return Err(Error::Crypto("bad TTP signature on sigma".into()));
     }
 
-    // --- Transcipher filtri + matrice indici (per blocco) ---
-    let t0 = Instant::now();
-    // e_a_vec[b][a] = ciphertext del blocco b per il DO a
-    let mut e_a_vec: Vec<Vec<Ciphertext>> = Vec::with_capacity(n_b);
-    for b in 0..n_b {
-        let mut block_cts = Vec::with_capacity(n);
-        for a in 0..n {
-            let bytes = &m_sigmas[a][b * block_bytes..(b + 1) * block_bytes];
-            let words = pasta_sim::bytes_to_words(bytes);
-            let nonce = [sigma as u64, b as u64];
-            let ct = fhe.transcipher(&ctx, &per_do_keys[a], nonce, &[0], &[words])?;
-            block_cts.push(ct);
-        }
-        e_a_vec.push(block_cts);
-    }
-
-    // E_A: n_a ciphertext (uno per blocco degli indici)
-    let mut e_a_ct_vec: Vec<Ciphertext> = Vec::with_capacity(n_a);
-    for b in 0..n_a {
-        let bytes = &m_a_sigma[b * block_bytes..(b + 1) * block_bytes];
-        let words = pasta_sim::bytes_to_words(bytes);
-        let nonce = [(u + sigma) as u64, b as u64];
-        let ct = fhe.transcipher(&ctx, &per_do_keys[0], nonce, &[0], &[words])?;
-        e_a_ct_vec.push(ct);
-    }
-    let t_transcipher = t0.elapsed().as_secs_f64();
+    // --- Transcipher + AND + decrypt, in groups of `lanes` blocks ---
+    // Global block_ids: the keystream() counter does not restart per group.
+    let lanes = ctx.lanes();
+    let n_groups_b = (n_b + lanes - 1) / lanes;
+    let n_groups_a = (n_a + lanes - 1) / lanes;
     eprintln!(
-        "[psi-alt] [transcipher] {} ct filtri + {} ct indici: {:.3} s",
-        n_b * n, n_a, t_transcipher
+        "[psi-alt] [groups] lanes={} -> {} gruppi filtro, {} gruppi indici",
+        lanes, n_groups_b, n_groups_a
     );
 
-    // --- AND slot-wise per blocco ---
-    let t0 = Instant::now();
-    let mut e_b_vec: Vec<Ciphertext> = Vec::with_capacity(n_b);
-    for b in 0..n_b {
-        e_b_vec.push(fhe.eval_and_all(&ctx, &e_a_vec[b], n)?);
-    }
-    let t_eval_and = t0.elapsed().as_secs_f64();
-    eprintln!("[psi-alt] [eval_and] {} blocchi AND: {:.3} s", n_b, t_eval_and);
+    let mut t_transcipher = 0.0f64;
+    let mut t_eval_and = 0.0f64;
+    let mut t_cmux_sim = 0.0f64;
 
-    // =====================================================================
-    // CMUX (SIMULATO multi-block) — vedi NOTES.md
-    //
-    // In FHE reale: R[j,l] = B_blocks[idx/t][idx%t] richiede un two-level
-    // CMUX (TFHE PBS). Qui S_1 ha sk e fa il lookup in chiaro, quindi il
-    // costo FHE del CMUX NON è misurato.
-    // =====================================================================
-    let t0 = Instant::now();
+    // ---- filters: slot-wise AND across DOs, then plaintext bits (simulated CMUX) ----
+    let nonce_b = [sigma as u64, 0u64];
     let mut b_bits_all: Vec<bool> = Vec::with_capacity(n_b * t);
-    for b in 0..n_b {
-        let bits = fhe.decrypt_bits(&ctx, &e_b_vec[b], t)?;
-        b_bits_all.extend_from_slice(&bits);
+    for g in 0..n_groups_b {
+        let b0 = g * lanes;
+        let b1 = ((g + 1) * lanes).min(n_b);
+        // Global block IDs for this group
+        let ids: Vec<u64> = (b0..b1).map(|b| b as u64).collect();
+
+        let t0 = Instant::now();
+        // Transcipher every DO's filter blocks for this group
+        let mut cts: Vec<Ciphertext> = Vec::with_capacity(n);
+        for a in 0..n {
+            let words: Vec<Vec<u64>> = (b0..b1)
+                .map(|b| pasta_sim::bytes_to_words(&m_sigmas[a][b * block_bytes..(b + 1) * block_bytes]))
+                .collect();
+            cts.push(fhe.transcipher(&ctx, &per_do_keys[a], nonce_b, &ids, &words)?);
+        }
+        t_transcipher += t0.elapsed().as_secs_f64();
+
+        let t0 = Instant::now();
+        // FHE AND across all DOs
+        let e_b = fhe.eval_and_all(&ctx, &cts, n)?;
+        t_eval_and += t0.elapsed().as_secs_f64();
+        drop(cts);
+
+        let t0 = Instant::now();
+        // Decrypt the resulting bits for this group
+        b_bits_all.extend(fhe.decrypt_bits(&ctx, &e_b, (b1 - b0) * t)?);
+        t_cmux_sim += t0.elapsed().as_secs_f64();
+
+        eprintln!("[psi-alt] [filtri] gruppo {}/{} ({} blocchi) fatto", g + 1, n_groups_b, b1 - b0);
     }
     b_bits_all.truncate(cfg.n_bits);
 
+    // ---- index matrix (only DO_1): transcipher + decrypt per group ----
+    let nonce_a = [(u + sigma) as u64, 0u64];
     let mut a_bits_all: Vec<bool> = Vec::with_capacity(n_a * t);
-    for b in 0..n_a {
-        let bits = fhe.decrypt_bits(&ctx, &e_a_ct_vec[b], t)?;
-        a_bits_all.extend_from_slice(&bits);
+    for g in 0..n_groups_a {
+        let b0 = g * lanes;
+        let b1 = ((g + 1) * lanes).min(n_a);
+        // Global block IDs for this group
+        let ids: Vec<u64> = (b0..b1).map(|b| b as u64).collect();
+        let words: Vec<Vec<u64>> = (b0..b1)
+            .map(|b| pasta_sim::bytes_to_words(&m_a_sigma[b * block_bytes..(b + 1) * block_bytes]))
+            .collect();
+
+        let t0 = Instant::now();
+        let ct = fhe.transcipher(&ctx, &per_do_keys[0], nonce_a, &ids, &words)?;
+        t_transcipher += t0.elapsed().as_secs_f64();
+
+        let t0 = Instant::now();
+        a_bits_all.extend(fhe.decrypt_bits(&ctx, &ct, (b1 - b0) * t)?);
+        t_cmux_sim += t0.elapsed().as_secs_f64();
+
+        eprintln!("[psi-alt] [indici] gruppo {}/{} ({} blocchi) fatto", g + 1, n_groups_a, b1 - b0);
     }
     a_bits_all.truncate(idx_bits_total);
 
+    // ---- Simulated CMUX: plaintext lookup ----
+    let t0 = Instant::now();
+    // Reconstruct each index from its little-endian bit encoding
     let mut indices: Vec<usize> = Vec::with_capacity(m1 * h);
     for i in 0..m1 * h {
         let mut idx = 0usize;
@@ -267,16 +299,20 @@ pub fn run_e2e_pasta_alt(
         }
         indices.push(idx);
     }
-
+    // Look up each index in the decrypted filter bits
     let mut r_bits: Vec<bool> = Vec::with_capacity(m1 * h);
     for &idx in &indices {
         r_bits.push(b_bits_all.get(idx).copied().unwrap_or(false));
     }
-    let t_cmux_sim = t0.elapsed().as_secs_f64();
-    eprintln!("[psi-alt] [CMUX-sim] {} lookup: {:.3} ms", m1 * h, t_cmux_sim * 1e3);
-    // =====================================================================
+    t_cmux_sim += t0.elapsed().as_secs_f64();
 
-    // --- DO_1 decide membership ---
+    eprintln!(
+        "[psi-alt] [transcipher] totale {:.3} s | [eval_and] {:.3} s | [CMUX-sim] decrypt+{} lookup {:.3} s",
+        t_transcipher, t_eval_and, m1 * h, t_cmux_sim
+    );
+    
+    // --- DO_1 decides membership ---
+    // An element is in the intersection only if all h lookups return true
     let mut do1_out: Vec<(Vec<u8>, [u8; 32])> = Vec::with_capacity(m1);
     for j in 0..m1 {
         let all_one = (0..h).all(|l| r_bits[j * h + l]);
@@ -285,6 +321,7 @@ pub fn run_e2e_pasta_alt(
     }
 
     // --- ground truth + FP/FN ---
+    // Build the true set intersection across all data owners
     let all_sets: Vec<HashSet<_>> = do_inputs
         .iter()
         .map(|d| d.elements.iter().cloned().collect())
@@ -295,6 +332,7 @@ pub fn run_e2e_pasta_alt(
         .filter(|x| all_sets.iter().all(|s| s.contains(*x)))
         .cloned()
         .collect();
+    // Elements for which DO_1 issued a non-zero token
     let found: Vec<Vec<u8>> = do1_out
         .iter()
         .filter(|(_, tk)| *tk != [0u8; 32])
