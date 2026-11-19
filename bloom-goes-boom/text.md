@@ -1,90 +1,111 @@
-Ecco un recap completo dei **tre binari** (test) che hai a disposizione, cosa fa ciascuno, e i comandi esatti per farli girare su Windows.
+```markdown
+# Available Binaries and Execution Guide
 
-Assumo che tu abbia già:
-1. Compilato con successo con `cargo build --release` (e che la DLL `libfftw3-3.dll` sia stata copiata in `target\release\` grazie al `build.rs`).
-2. Le cartelle `experiments\` e `results\` presenti.
+Overview of the **three binaries** (tests) available in the project, what each one does, and the exact commands to run them on Windows.
+
+### Prerequisites
+1. The project has been compiled with `cargo build --release` (and `libfftw3-3.dll` has been copied to `target\release\` via `build.rs`).
+2. The `experiments\` and `results\` directories exist in the project root.
 
 ---
 
-## 1. `attack_single.exe` — L'attacco base (Single Bloom Filter)
+## 1. `attack_single.exe` — Baseline Attack (Single Bloom Filter)
 
-**Cosa fa:** È l'attacco classico del paper. Costruisce **un solo** Bloom filter, calcola l'attack set tramite la funzione `snipe`, e misura il vantaggio dell'attaccante nell'indovinare se un certo target è nel set della vittima.
+**Overview:** Implements the standard attack from the reference paper. It builds a **single** Bloom filter, computes the attack set via the `snipe` function, and measures the attacker's advantage in guessing whether a specific target belongs to the victim's set.
 
-**Come testarlo (Smoke test veloce, pochi secondi):**
-Apri `cmd` nella root del progetto e lancia:
+**Smoke test (quick verification, takes a few seconds):**
+Open `cmd` in the project root and run:
 ```cmd
 target\release\attack_single.exe --universe-size=22 --universe-client-factor=2 --max-set-size=4 --client-set-size=4 --false-positives=10 --trials=100 -v
-```
-*Cosa aspettarti:* Stampa i parametri del filtro, il numero di thread, e alla fine una riga con il vantaggio (es. `0.85000 \\ % [...]`).
 
-**Come lanciare i test veri (da ore):**
+```
+
+*Expected output:* Prints the filter parameters, the thread count, and a final line reporting the advantage (e.g., `0.85000 \\ % [...]`).
+
+**Full benchmark (multi-hour run):**
+
 ```cmd
 target\release\attack_single.exe --universe-size=32 --universe-client-factor=2 --max-set-size=8 --client-set-size=8 --false-positives=10 --trials=1000000 -v
+
 ```
 
 ---
 
-## 2. `attack.exe` — L'attacco Doppio (Dual Bloom Filter)
+## 2. `attack.exe` — Dual Attack (Dual Bloom Filter)
 
-**Cosa fa:** Simula un protocollo in cui vengono usati **due** Bloom filter con famiglie di hash diverse. L'attaccante cerca di trovare un "target comune" che funzioni per entrambi i filtri (con un massimo di tentativi, altrimenti fa fallback su target individuali). Misura il vantaggio separatamente per BF1 e BF2.
+**Overview:** Simulates a protocol using **two** Bloom filters with distinct hash families. The attacker attempts to find a "common target" that works across both filters (up to a maximum number of attempts, falling back to individual targets otherwise). Measures the advantage separately for BF1 and BF2.
 
-**Come testarlo (Smoke test veloce):**
+**Smoke test (quick verification):**
+
 ```cmd
 target\release\attack.exe --universe-size=22 --universe-client-factor=2 --max-set-size=4 --client-set-size=4 --false-positives=10 --trials=100 -v
-```
-*Cosa aspettarti:* Stampa due righe finali: `BF1 Advantage: ...` e `BF2 Advantage: ...`.
 
-**Come lanciare i test veri:**
+```
+
+*Expected output:* Prints two final lines: `BF1 Advantage: ...` and `BF2 Advantage: ...`.
+
+**Full benchmark:**
+
 ```cmd
 target\release\attack.exe --universe-size=32 --universe-client-factor=2 --max-set-size=8 --client-set-size=8 --false-positives=10 --trials=1000000 -v
+
 ```
 
 ---
 
-## 3. `plausible_deniability.exe` — L'esperimento per la tua Tesi (U filtri + σ)
+## 3. `plausible_deniability.exe` — Countermeasure Experiment ($U$ Filters + $\sigma$)
 
-**Cosa fa:** È il test che hai richiesto per dimostrare l'efficacia della contromisura con **U filtri** e l'indice segreto **σ** (sigma). Il data owner costruisce `U` filtri con hash diversi. Lo STTP ne sceglie uno a caso. L'attaccante proverà tre strategie diverse per capire quanto vantaggio ottiene.
+**Overview:** Evaluates the effectiveness of the countermeasure using **$U$ filters** and a secret index **$\sigma$** (sigma). The data owner builds $U$ filters with different hash functions, and the STTP randomly selects one. The attacker tests three distinct strategies to evaluate the resulting advantage.
 
-**Come testarlo (Smoke test veloce):**
+**Smoke test (quick verification):**
+
 ```cmd
 target\release\plausible_deniability.exe --universe-size=22 --universe-client-factor=2 --max-set-size=4 --client-set-size=4 --false-positives=10 --trials=100 --num-filters=4 --strategy=single_u -v
+
 ```
-*Cosa aspettarti:* Alla fine stamperà una riga tipo `U=4 strategy=single_u advantage=0.25 \\ % ...`. Se l'esperimento funziona, noterai che l'advantage scende drasticamente rispetto a `U=1`.
 
-**Le 3 strategie (flag `--strategy`):**
-*   `single_u`: l'attaccante scommette su un solo filtro (sigma).
-*   `union`: l'attaccante unisce gli attacchi per tutti i filtri.
-*   `same_target`: l'attaccante attacca lo stesso elemento (equivalente a metterlo nel proprio set, quindi vantaggio = 0).
+*Expected output:* Prints a final line formatted as `U=4 strategy=single_u advantage=0.25 \\ % ...`. The advantage drops significantly compared to `U=1`.
 
-**Come lanciare i test veri (sweep su U):**
+**Available strategies (`--strategy` flag):**
+
+* `single_u`: The attacker guesses a single filter ($\sigma$).
+* `union`: The attacker takes the union of attacks across all filters.
+* `same_target`: The attacker targets the same element across filters (equivalent to including it in their own set, yielding an advantage of 0).
+
+**Full benchmark (sweep over $U$):**
+
 ```cmd
 target\release\plausible_deniability.exe --universe-size=32 --universe-client-factor=2 --max-set-size=8 --client-set-size=8 --false-positives=10 --trials=1000000 --num-filters=16 --strategy=single_u -v
+
 ```
 
 ---
 
-## 🐍 Automazione con Python (per i grafici della tesi)
+## Python Automation (Plotting Results)
 
-Per non dover lanciare a mano decine di comandi, usa gli script Python. **Attenzione**: su Windows devi usare `python` (non `python3`) e assicurarti che gli script puntino ai file `.exe` con il percorso corretto (es. `r"..\target\release\attack_single.exe"`).
+To avoid running dozens of commands manually, use the provided Python scripts. **Note:** On Windows, invoke `python` (not `python3`) and verify that the scripts point to the `.exe` binaries using the proper relative path (e.g., `r"..\target\release\attack_single.exe"`).
 
-Apri `cmd`, entra nella cartella `experiments` ed esegui:
+Open `cmd`, navigate to the `experiments` directory, and run:
 
 ```cmd
 cd experiments
 
-:: 1. Testa l'attacco base
+:: 1. Run the baseline attack
 python -u run_attack_single.py > ..\results\attack_single.txt 2>&1
 
-:: 2. Testa l'attacco doppio (con la ricerca del target comune)
+:: 2. Run the dual attack (with common target search)
 python -u run_experiments.py > ..\results\attack_dual.txt 2>&1
 
-:: 3. Testa la contromisura (U filtri) e salva i risultati in JSON
+:: 3. Run the countermeasure experiment (U filters) and save results to JSON
 python -u run_plausible_deniability.py > ..\results\deniability.txt 2>&1
 
-:: 4. Genera i grafici (Advantage vs U) in experiments/results/
+:: 4. Generate plots (Advantage vs U) in experiments/results/
 python plot_results.py
+
 ```
 
-Se gli script ci mettono troppo (perché `universe_size=32` è pesante), apri i file `.py` e cambia `universe_size = 26` e `trials = 100000`. I grafici mostreranno comunque la tendenza corretta (l'Advantage che crolla all'aumentare di U) in pochi minuti.
+*Performance tip:* If the scripts take too long to complete (`universe_size=32` is computationally heavy), open the `.py` files and set `universe_size = 26` and `trials = 100000`. This will still capture the expected trend (advantage decreasing as $U$ increases) within a few minutes.
 
----
+```
+
+```
