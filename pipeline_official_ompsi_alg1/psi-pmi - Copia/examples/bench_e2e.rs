@@ -1,5 +1,3 @@
-//! Benchmark CLI per psi-pmi. Multi-block supportato.
-//!
 //! Uso:
 //!   cargo run --release --example bench_e2e -- [OPZIONI]
 
@@ -45,9 +43,10 @@ fn print_usage(prog: &str) {
            --append       Append to existing CSV\n\
            --help, -h     Show this help\n\
          \n\
-         Multi-block limits (PASTA3, t=128):\n\
-           degree 8192  -> ~4096 usable slots -> n_bits <= 4096 (m <= ~950 at k=3)\n\
-           degree 32768 -> ~16384 usable slots -> n_bits <= 16384 (m <= ~3800 at k=3)\n"
+                  Multi-block (PASTA3, t=128):\n\
+           n_bits is divided in groups of `lanes` blocks (lanes = degree/512):\n\
+           degree 8192 -> 16 lane (2048 bit per ciphertext), 16384 -> 32, 32768 -> 64.\n\
+           Other then the limits, it is used more ciphertext ( RAM is the limit).\n"
     );
 }
 
@@ -214,14 +213,7 @@ fn main() -> anyhow::Result<()> {
         "[bench] n_bits={} -> {} block(s) of {} bits each",
         cfg.n_bits, num_blocks, PASTA3.t
     );
-    if num_blocks > 128 {
-        eprintln!(
-            "[bench] WARNING: {} blocks. With degree 8192 (4096 slots), \
-             max ~32 blocks. With degree 32768 (16384 slots), max ~128 blocks. \
-             num_blocks > slot_capacity/128 WILL FAIL. Test --n-bits 256 first.",
-            num_blocks
-        );
-    }
+    
 
     let write_header = !cfg.append || !cfg.out.exists();
     let file = if cfg.append {
