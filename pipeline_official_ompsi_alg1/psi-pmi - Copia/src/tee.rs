@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use fhe::bfv::Ciphertext;
 
 use crate::bloom::HashFamilies;
-use crate::pasta_fhe::{ct_fingerprint, PastaFhe, TransievePasta};
+use crate::pasta_fhe::{ct_fingerprint_multi, PastaFhe, TransievePasta};
 use crate::sig::Verifier;
 use crate::ttp::eval_msg;
 use crate::types::{fresh_token, Sid};
@@ -98,48 +98,60 @@ impl Tee1Pasta {
     /// Il ciphertext `e_b` non è serializzato: è passato in-process. La firma
     /// di S1 è sul fingerprint SHAKE256, non sui byte serde.
     pub fn process_eval(
-        &mut self,
-        sid: &Sid,
-        e_b: &Ciphertext,
-        sig: &[u8],
-        num_bits: usize,
-    ) -> Result<Vec<(Vec<u8>, [u8; 32])>> {
-        // 1. anti-replay
-        if self.used_sids.contains(sid) {
-            return Err(Error::TeeAbort("sid already used".into()));
-        }
-        // 2. firma S1 sul fingerprint del ciphertext
-        let fp = ct_fingerprint(e_b);
-        let signed_msg = eval_msg(sid, &fp);
-        if !self.s1_verifier.verify(&signed_msg, sig) {
-            return Err(Error::TeeAbort("bad S1 signature on Eval".into()));
-        }
-        // 3. stato preregistrato
-        let sigma = self
-            .sigma
-            .ok_or_else(|| Error::TeeAbort("sigma not registered".into()))?;
-        let host = self
-            .host_input
-            .take()
-            .ok_or_else(|| Error::TeeAbort("host input missing".into()))?;
-        // 4. decifra e calcola Out
-        let b_bits = self.fhe.decrypt_bits(&self.ctx, e_b, num_bits)?;
-        let family = host.hashes.get(sigma);
-        let mut out = Vec::with_capacity(host.d1_prime.len());
-        for ct in &host.d1_prime {
-            let x = crate::sim::dec_with_nonce(&host.k_sym, ct)
-                .ok_or_else(|| Error::TeeAbort("SIM decrypt failed on D1'".into()))?;
-            let all_one = family
-                .positions(&x, b_bits.len())
-                .iter()
-                .all(|&p| b_bits[p]);
-            let token = if all_one { fresh_token() } else { [0u8; 32] };
-            out.push((x, token));
-        }
-        // 5. marca usato
-        self.used_sids.insert(*sid);
-        Ok(out)
+    &mut self,
+    sid: &Sid,
+    e_b: &[Ciphertext],
+    sig: &[u8],
+    num_bits: usize,
+) -> Result<Vec<(Vec<u8>, [u8; 32])>> {
+    // 1. anti-replay
+    if self.used_sids.contains(sid) {
+        return Err(Error::TeeAbort("sid already used".into()));
     }
+    // 2. firma S1 sul fingerprint dell'intera sequenza di gruppi
+    let fp = ct_fingerprint_multi(e_b);
+    let signed_msg = eval_msg(sid, &fp);
+    if !self.s1_verifier.verify(&signed_msg, sig) {
+        return Err(Error::TeeAbort("bad S1 signature on Eval".into()));
+    }
+    // 3. numero di gruppi coerente con num_bits
+    let per_group = self.ctx.lanes() * self.fhe.params.t;
+    let expected_groups = (num_bits + per_group - 1) / per_group;
+    if e_b.len() != expected_groups {
+        return Err(Error::TeeAbort(format!(
+            "expected {} ciphertext groups, got {}", expected_groups, e_b.len()
+        )));
+    }
+    // 4. stato preregistrato
+    let sigma = self
+        .sigma
+        .ok_or_else(|| Error::TeeAbort("sigma not registered".into()))?;
+    let host = self
+        .host_input
+        .take()
+        .ok_or_else(|| Error::TeeAbort("host input missing".into()))?;
+    // 5. decifra ogni gruppo e concatena
+    let mut b_bits: Vec<bool> = Vec::with_capacity(num_bits);
+    for (g, ct) in e_b.iter().enumerate() {
+        let nb = per_group.min(num_bits - g * per_group);
+        b_bits.extend(self.fhe.decrypt_bits(&self.ctx, ct, nb)?);
+    }
+    let family = host.hashes.get(sigma);
+    let mut out = Vec::with_capacity(host.d1_prime.len());
+    for ct in &host.d1_prime {
+        let x = crate::sim::dec_with_nonce(&host.k_sym, ct)
+            .ok_or_else(|| Error::TeeAbort("SIM decrypt failed on D1'".into()))?;
+        let all_one = family
+            .positions(&x, b_bits.len())
+            .iter()
+            .all(|&p| b_bits[p]);
+        let token = if all_one { fresh_token() } else { [0u8; 32] };
+        out.push((x, token));
+    }
+    // 6. marca usato
+    self.used_sids.insert(*sid);
+    Ok(out)
+}
 
     /// Solo per diagnostica/test.
     pub fn used_sid_count(&self) -> usize {
