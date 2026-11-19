@@ -1,4 +1,4 @@
-```markdown
+
 # Available Binaries and Execution Guide
 
 Overview of the **three binaries** (tests) available in the project, what each one does, and the exact commands to run them on Windows.
