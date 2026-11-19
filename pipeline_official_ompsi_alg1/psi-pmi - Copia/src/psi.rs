@@ -7,7 +7,7 @@ use zeroize::Zeroize;
 
 use crate::bloom::HashFamilies;
 use crate::ot::{ot_phase1, ot_phase2, ot_phase2_with_sigma, ot_phase3, ot_phase4};
-use crate::pasta_fhe::{ct_fingerprint, PastaFhe, TransievePasta};
+use crate::pasta_fhe::{ct_fingerprint_multi, PastaFhe, TransievePasta};
 use crate::sig::{Ed25519Signer, Ed25519Verifier, Signer, Verifier};
 use crate::sim::{enc_with_nonce, pasta_sim};
 use crate::tee::{Tee1Pasta, TeeHostInputPasta};
@@ -16,6 +16,7 @@ use crate::types::{fresh_sid, Sid};
 use crate::{Error, Result};
 
 use transieve::cipher::bfv::pasta::PastaParams;
+use fhe::bfv::Ciphertext;
 
 pub struct DataOwnerInput {
     pub elements: Vec<Vec<u8>>,
@@ -227,58 +228,62 @@ pub fn run_e2e_pasta(
     let sig_sigma = ttp.signer.sign(&sigma_msg(&sid, sigma));
     tee.register_sigma(sigma, &sigma_msg(&sid, sigma), &sig_sigma)?;
 
-    // NEW: transcipher multi-block. Per ogni DO, splittiamo m_sigma in
-    // `num_blocks` blocchi da `block_size` byte, ognuno convertito in
-    // `t` parole, e passiamo `blocks = [0, 1, ..., num_blocks-1]`.
-    let nonce = [sigma as u64, 0u64];
-    let block_ids: Vec<u64> = (0..num_blocks as u64).collect();
+    // Transcipher + AND per gruppi di `lanes` blocchi. block_ids globali.
+let lanes = tee.ctx().lanes();
+let num_groups = (num_blocks + lanes - 1) / lanes;
+eprintln!("[psi] [groups]      {} blocks, {} lanes -> {} group(s)", num_blocks, lanes, num_groups);
+
+let nonce = [sigma as u64, 0u64];
+let mut e_b_groups: Vec<Ciphertext> = Vec::with_capacity(num_groups);
+let mut t_transcipher = 0.0f64;
+let mut t_eval_and = 0.0f64;
+
+for g in 0..num_groups {
+    let b0 = g * lanes;
+    let b1 = ((g + 1) * lanes).min(num_blocks);
+    let block_ids: Vec<u64> = (b0..b1).map(|b| b as u64).collect();
+
     let mut e_a_vec = Vec::with_capacity(n);
-    let t0 = Instant::now();
     for a in 0..n {
         let m = &m_sigmas[a];
-        let mut cipher_words_blocks: Vec<Vec<u64>> = Vec::with_capacity(num_blocks);
-        for b in 0..num_blocks {
-            let start = b * block_size;
-            let end = (start + block_size).min(m.len());
-            cipher_words_blocks.push(pasta_sim::bytes_to_words(&m[start..end]));
-        }
-        let ct = tee.fhe().transcipher(
-            tee.ctx(),
-            &per_do_keys[a],
-            nonce,
-            &block_ids,
-            &cipher_words_blocks,
-        )?;
+        let words: Vec<Vec<u64>> = (b0..b1)
+            .map(|b| {
+                let s = b * block_size;
+                let e = (s + block_size).min(m.len());
+                pasta_sim::bytes_to_words(&m[s..e])
+            })
+            .collect();
+        let t_do = Instant::now();
+        let ct = tee.fhe().transcipher(tee.ctx(), &per_do_keys[a], nonce, &block_ids, &words)?;
+        let dt = t_do.elapsed().as_secs_f64();
+        t_transcipher += dt;
         eprintln!(
-            "[psi] [transcipher] DO_{} ({} blocks × {} words = {} B): {:.3} s",
-            a + 1,
-            num_blocks,
-            params.t,
-            m.len(),
-            t0.elapsed().as_secs_f64()
+            "[psi] [transcipher] group {}/{} DO_{} ({} blocks): {:.3} s",
+            g + 1, num_groups, a + 1, b1 - b0, dt
         );
         e_a_vec.push(ct);
     }
-    let t_transcipher = t0.elapsed().as_secs_f64();
+
+    let t_and = Instant::now();
+    let e_b_g = tee.fhe().eval_and_all(tee.ctx(), &e_a_vec, n)?;
+    t_eval_and += t_and.elapsed().as_secs_f64();
+    e_b_groups.push(e_b_g);
+}
+eprintln!(
+    "[psi] [eval_and]    {} group(s): AND {:.3} s (transcipher totale {:.3} s)",
+    num_groups, t_eval_and, t_transcipher
+);
+
+let ct_size_bytes: usize = {
+    use fhe_traits::Serialize as FheSerialize;
+    e_b_groups.iter().map(|c| c.to_bytes().len()).sum()
+};
 
     let t0 = Instant::now();
-    let e_b = tee.fhe().eval_and_all(tee.ctx(), &e_a_vec, n)?;
-    let t_eval_and = t0.elapsed().as_secs_f64();
-    eprintln!(
-        "[psi] [eval_and]    slot-wise AND across n={} DOs: {:.3} s",
-        n, t_eval_and
-    );
-
-    let ct_size_bytes = {
-        use fhe_traits::Serialize as FheSerialize;
-        e_b.to_bytes().len()
-    };
-
-    let t0 = Instant::now();
-    let fp = ct_fingerprint(&e_b);
+    let fp = ct_fingerprint_multi(&e_b_groups);
     let signed_msg = eval_msg(&sid, &fp);
     let sig_eval = s1.sign(&signed_msg);
-    let out = tee.process_eval(&sid, &e_b, &sig_eval, cfg.n_bits)?;
+    let out = tee.process_eval(&sid, &e_b_groups, &sig_eval, cfg.n_bits)?;
     let t_tee = t0.elapsed().as_secs_f64();
     eprintln!(
         "[psi] [TEE]         |D1'|={} tokens in {:.3} ms",
