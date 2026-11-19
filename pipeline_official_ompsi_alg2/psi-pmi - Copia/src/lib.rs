@@ -7,7 +7,6 @@ pub mod sig;
 pub mod sim;
 pub mod ttp;
 pub mod types;
-// NB: nessun `pub mod tee;` — Algorithm 2 non usa il TEE.
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -20,7 +19,7 @@ pub enum Error {
     #[error("invalid input: {0}")]
     Invalid(String),
     #[error("tee abort: {0}")]
-    TeeAbort(String), // mantenuto per compatibilità, non usato in Alg. 2
+    TeeAbort(String), 
     #[error("fhe: {0}")]
     Fhe(String),
 }
