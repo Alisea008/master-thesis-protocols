@@ -50,7 +50,7 @@ pub fn dec_with_nonce(key: &[u8], input: &[u8]) -> Option<Vec<u8>> {
 // SIM "Pasta-shaped" usata dal transcipher.
 // -------------------------------------------------------------------------
 
-use transieve::cipher::bfv::pasta::{encrypt as pasta_encrypt, P};
+use transieve::cipher::bfv::pasta::P;
 
 /// Deriva 2t field element mod P da k_sym. Stessa derivazione in
 /// `pasta_fhe::pack_key` e `pasta_sim::enc_blocks`.
@@ -69,7 +69,7 @@ pub fn derive_pasta_key(k_sym: &[u8], t: usize) -> Vec<u64> {
 }
 
 pub mod pasta_sim {
-    use super::{derive_pasta_key, pasta_encrypt};
+    use super::{derive_pasta_key};
     use transieve::cipher::bfv::pasta::PastaParams;
 
     /// Single-block encryption (n_bits <= t). Wrapper di `enc_blocks` con
@@ -91,30 +91,33 @@ pub mod pasta_sim {
     /// Returns one `Vec<u8>` per block, each of size `t * 8` bytes
     /// (128 field elements × 8 bytes = 1024 bytes for PASTA3).
     pub fn enc_blocks(
-        bits: &[u8],
-        k_sym: &[u8],
-        nonce_base: [u64; 2],
-        params: PastaParams,
-    ) -> Vec<Vec<u8>> {
-        let t = params.t;
-        let n_blocks = (bits.len() + t - 1) / t;
-        let key = derive_pasta_key(k_sym, t);
-        let mut out = Vec::with_capacity(n_blocks);
-        for b in 0..n_blocks {
-            let start = b * t;
-            let end = (start + t).min(bits.len());
-            let mut msg: Vec<u64> = bits[start..end]
-                .iter()
-                .map(|&x| (x & 1) as u64)
-                .collect();
-            msg.resize(t, 0);
-            let nonce = [nonce_base[0], nonce_base[1].wrapping_add(b as u64)];
-            let ct = pasta_encrypt(&key, &msg, nonce, params);
-            out.push(words_to_bytes(&ct));
-        }
-        out
-    }
+    bits: &[u8],
+    k_sym: &[u8],
+    nonce: [u64; 2],
+    params: PastaParams,
+) -> Vec<Vec<u8>> {
+    use rayon::prelude::*;
+    use transieve::cipher::bfv::pasta::keystream_block;
 
+    let t = params.t;
+    let n_blocks = (bits.len() + t - 1) / t;
+    let key = derive_pasta_key(k_sym, t);
+
+    (0..n_blocks)
+        .into_par_iter()
+        .map(|b| {
+            let ks = keystream_block(&key, nonce, b as u64, params);
+            let s = b * t;
+            let words: Vec<u64> = (0..t)
+                .map(|i| {
+                    let m = if s + i < bits.len() { (bits[s + i] & 1) as u64 } else { 0 };
+                    (m + ks[i]) % super::P
+                })
+                .collect();
+            words_to_bytes(&words)
+        })
+        .collect()
+}
     pub fn words_to_bytes(words: &[u64]) -> Vec<u8> {
         let mut out = Vec::with_capacity(words.len() * 8);
         for w in words { out.extend_from_slice(&w.to_le_bytes()); }
