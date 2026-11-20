@@ -10,6 +10,10 @@
 //!   * `same_target`  - attack the SAME element across all families
 //!                     (equivalent to inserting it into one's own set)
 
+/// Only count candidates that snipe t* in all of the first j families (j = 1..U)
+#[structopt(long)]
+joint_count: bool,
+
 use std::time::Instant;
 
 use rand::seq::index::sample;
@@ -100,9 +104,13 @@ fn main() {
 
     // 1. Pre-compute U attack sets, one per hash family.
     let start = Instant::now();
+    let needed = if strategy == "split_union" { u_count } else { 1 };
+    let budget = if strategy == "split_union" { (k / u_count).max(1) } else { k };
+
     let snipes: Vec<(Vec<usize>, usize)> = families
-        .par_iter()
-        .map(|fam| snipe(fam, u1.clone(), k, u2.clone(), x2_size, num_threads, false, verbose))
+        .iter()
+        .take(needed)
+        .map(|fam| snipe(fam, u1.clone(), budget, u2.clone(), x2_size, num_threads, false, verbose))
         .collect();
     let attack_sets: Vec<Vec<usize>> = snipes.iter().map(|(s, _)| s.clone()).collect();
     let targets: Vec<usize> = snipes.iter().map(|(_, t)| *t).collect();
@@ -116,19 +124,30 @@ fn main() {
 
     // The element whose membership the attacker is trying to infer.
     let t_star = targets[0];
-
+        
+    // Joint-candidate mode: how many y snipe t* in ALL of the first j families?
+    if opt.joint_count {
+        for j in 1..=u_count {
+            let n = bloom_goes_boom::count_joint_candidates(
+                &families[..j], u1.clone(), &u2, t_star,
+            );
+            println!("U={} joint_candidates={}", j, n);
+        }
+        return;
+    }
     // 2. Attacker's X_1 depends on the strategy.
     let x1: Vec<usize> = match strategy.as_str() {
-        "single_u" => attack_sets[0].clone(),
-        "union" => {
-            let mut v: Vec<usize> = attack_sets.iter().flatten().copied().collect();
-            v.sort_unstable();
-            v.dedup();
-            v
-        }
-        "same_target" => vec![t_star],
-        other => panic!("Unknown strategy: {} (expected single_u|union|same_target)", other),
+    "single_u" => attack_sets[0].clone(),
+    "split_union" => {
+        let mut v: Vec<usize> = attack_sets.iter().flatten().copied().collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+    "same_target" => vec![t_star],
+    other => panic!("Unknown strategy: {} (expected single_u|split_union|same_target)", other),
     };
+    assert!(x1.len() <= k, "X_1 exceeds the budget k");
 
     if verbose >= 1 {
         println!("% |X_1| = {}", x1.len());
@@ -136,26 +155,36 @@ fn main() {
 
     // 3. Evaluate.
     let start = Instant::now();
-    let score: Confusion = (0..trials)
+    let score: [Confusion; 2] = (0..trials)
         .into_par_iter()
         .fold(
-            || Confusion::new(),
+            || [Confusion::new(), Confusion::new()],
             |acc, _| {
                 let acc = run_trial(&families, &x1, t_star, u2_size, x2_size, true, acc);
                 run_trial(&families, &x1, t_star, u2_size, x2_size, false, acc)
             },
         )
-        .reduce(|| Confusion::new(), |a, b| a.merge(b));
+        .reduce(
+            || [Confusion::new(), Confusion::new()],
+            |a, b| {
+                let [a0, a1] = a;
+                let [b0, b1] = b;
+                [a0.merge(b0), a1.merge(b1)]
+            },
+        );
 
     if verbose >= 1 {
         println!("% Ran {} trials in {:?}", trials, start.elapsed());
     }
 
-    let accuracy = (score.entries[3] + score.entries[0]) as f64 / trials as f64;
-    let advantage = accuracy - 1.0;
+    let [c0, c1] = score;
+    let (adv_s0, _) = c0.advantage();
+    let (adv_other, _) = c1.advantage();
+    let total = c0.merge(c1);
+    let (advantage, se) = total.advantage();
     println!(
-        "U={} strategy={} advantage={:.5} \\\\ % {}",
-        u_count, strategy, advantage, score
+        "U={} strategy={} advantage={:.5} se={:.5} adv_sigma0={:.5} adv_sigma_other={:.5} \\\\ % {}",
+        u_count, strategy, advantage, se, adv_s0, adv_other, total
     );
 }
 
@@ -166,8 +195,8 @@ fn run_trial(
     u2_size: usize,
     x2_size: usize,
     with_target: bool,
-    mut acc: Confusion,
-) -> Confusion {
+    mut acc: [Confusion; 2],
+) -> [Confusion; 2] {
     let mut rng = thread_rng();
 
     // Victim set with or without the target.
@@ -189,6 +218,8 @@ fn run_trial(
     let intersection = x1.iter().any(|e| bf.contains(e));
     let has_target = victim_set.contains(&t_star);
 
-    acc.entries[((intersection as usize) << 1) + has_target as usize] += 1;
+    let class = (sigma != 0) as usize;
+    acc[class].entries[((intersection as usize) << 1) + has_target as usize] += 1;
     acc
 }
+

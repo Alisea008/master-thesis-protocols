@@ -135,7 +135,7 @@ fn find_common_target_with_retries(
             if verbose >= 1 {
                 println!("% Common target on attempt {}/{}: {}", attempt, max_attempts, common);
             }
-            return (as1, as2, common, common, false);
+            return (as1, as2, t1, t2, false);  
         }
 
         if verbose >= 1 {

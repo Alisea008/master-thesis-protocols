@@ -2,15 +2,13 @@ import subprocess, json, os
 
 EXE = "../target/release/plausible_deniability"
 TRIALS = 1_000_000
-U_VALUES = [1, 2, 4, 8, 16, 32]
+U_VALUES = [1, 2, 4, 8, 16]
 STRATEGIES = ["single_u", "union", "same_target"]
 
 # (false_positives, log2_k, universe_client_factor) — casi facili del paper
 CONFIGS = [(10, 8, 2), (20, 8, 2), (10, 12, 2)]
 
-# Riduci universe_size se U e' grande e il tempo e' proibitivo.
-# 32 con U=32 puo' richiedere ore; usa 26-28 per demo veloci.
-UNIVERSE_SIZE = 32
+UNIVERSE_SIZE = 26
 
 os.makedirs("results", exist_ok=True)
 

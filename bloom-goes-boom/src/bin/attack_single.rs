@@ -111,7 +111,7 @@ fn agg_confusion(
     let mut rng = thread_rng();
 
     let mut victim_set = sample(&mut rng, u2_size, x2_size).into_vec();
-    while victim_set.contains(&target) == with_target {
+    while victim_set.contains(&target) != with_target {
         victim_set = sample(&mut rng, u2_size, x2_size).into_vec();
     }
 

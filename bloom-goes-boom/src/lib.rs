@@ -103,6 +103,17 @@ pub struct Confusion {
 }
 
 impl Confusion {
+    /// (advantage = TPR - FPR, standard error)
+    pub fn advantage(&self) -> (f64, f64) {
+        let [tn, fnn, fp, tp] = self.entries.map(|x| x as f64);
+        let (p, n) = (tp + fnn, fp + tn);
+        if p == 0.0 || n == 0.0 {
+            return (f64::NAN, f64::NAN);
+        }
+        let (tpr, fpr) = (tp / p, fp / n);
+        let se = (tpr * (1.0 - tpr) / p + fpr * (1.0 - fpr) / n).sqrt();
+        (tpr - fpr, se)
+    }
     pub fn new() -> Self {
         Confusion {
             entries: [0; 4],
@@ -143,7 +154,7 @@ impl Display for Confusion {
 // Scoring
 // ---------------------------------------------------------------------------
 
-fn hash_hits(bf_params: &BloomFilterParams, set: &Range<usize>) -> Vec<Vec<usize>> {
+pub fn hash_hits(bf_params: &BloomFilterParams, set: &Range<usize>) -> Vec<Vec<usize>> {
     let mut result: Vec<Vec<usize>> = (0..bf_params.bin_count).map(|_| vec![]).collect();
 
     for el in set.clone() {
@@ -295,10 +306,13 @@ fn find_all_candidates(
         let hh_ref = &hh;
         let bins_target_ref = &bins_target;
 
+        let (u1_start, u1_end) = (u1.start, u1.end);
         for i in 0..thread_count {
             handles.push(s.spawn(move || {
                 let mut candidates = vec![];
-                for y in (u1.start + i * chunk_size)..((i + 1) * chunk_size) {
+                let start = u1_start + i * chunk_size;
+                let end = if i + 1 == thread_count { u1_end } else { start + chunk_size };
+                for y in start..end {
                     let sniped_target;
                     if covert {
                         sniped_target =
@@ -323,7 +337,7 @@ fn find_all_candidates(
     all_candidates
 }
 
-fn potential_candidate(
+pub fn potential_candidate(
     bf_params: &BloomFilterParams,
     hh_ref: &Vec<Vec<usize>>,
     bins_target_ref: &BTreeSet<usize>,
@@ -428,4 +442,31 @@ pub fn snipe(
         thread_count,
     );
     (x1, target)
+}
+
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
+/// Number of y in `u1` that snipe `target` simultaneously in ALL given families.
+pub fn count_joint_candidates(
+    fams: &[BloomFilterParams],
+    u1: Range<usize>,
+    u2: &Range<usize>,
+    target: usize,
+) -> usize {
+    let ctx: Vec<(&BloomFilterParams, Vec<Vec<usize>>, BTreeSet<usize>)> = fams
+        .iter()
+        .map(|p| {
+            let hh = hash_hits(p, u2);
+            let bt: BTreeSet<usize> = p
+                .seeds
+                .iter()
+                .map(|s| hash_element(&target, *s) % p.bin_count)
+                .collect();
+            (p, hh, bt)
+        })
+        .collect();
+
+    u1.into_par_iter()
+        .filter(|y| ctx.iter().all(|(p, hh, bt)| potential_candidate(p, hh, bt, y, usize::MAX)))
+        .count()
 }

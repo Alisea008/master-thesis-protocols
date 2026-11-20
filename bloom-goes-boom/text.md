@@ -70,7 +70,7 @@ target\release\plausible_deniability.exe --universe-size=22 --universe-client-fa
 
 * `single_u`: The attacker guesses a single filter ($\sigma$).
 * `union`: The attacker takes the union of attacks across all filters.
-* `same_target`: The attacker targets the same element across filters (equivalent to including it in their own set, yielding an advantage of 0).
+* `same_target`: ... (equivalent to including it in their own set; the advantage is ≈ 1 − ε for every U, since this is the inherent PSI leakage that σ does not protect).
 
 **Full benchmark (sweep over $U$):**
 
