@@ -2,7 +2,8 @@ import subprocess
 
 executable = "../target/release/attack"        # <-- era bloom-goes-boom
 trials = 1000000
-universe_size = 32
+# universe_size = 32
+universe_size = 26
 
 options_priority = [
     (5, 8, 2),
