@@ -10,10 +10,6 @@
 //!   * `same_target`  - attack the SAME element across all families
 //!                     (equivalent to inserting it into one's own set)
 
-/// Only count candidates that snipe t* in all of the first j families (j = 1..U)
-#[structopt(long)]
-joint_count: bool,
-
 use std::time::Instant;
 
 use rand::seq::index::sample;
@@ -58,6 +54,9 @@ struct Opt {
 
     #[structopt(short, parse(from_occurrences))]
     verbose: u8,
+
+    #[structopt(long)]
+    joint_count: bool,
 }
 
 /// Derive U distinct hash families from a base parameter set.
