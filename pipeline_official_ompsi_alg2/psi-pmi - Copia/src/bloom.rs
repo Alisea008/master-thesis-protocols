@@ -68,7 +68,6 @@ impl BloomFilter {
         Self { n_bits: bytes.len() * 8, bits: bytes }
     }
 
-    /// Espande a un bit per slot (0/1) — formato accettato dal transcipher.
     pub fn to_bit_slots(&self) -> Vec<u8> {
         (0..self.n_bits).map(|i| self.get(i) as u8).collect()
     }
