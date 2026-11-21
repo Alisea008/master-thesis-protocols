@@ -173,7 +173,7 @@ pub fn run_e2e_pasta_alt(
     }
     let t_sim_enc = t0.elapsed().as_secs_f64();
     eprintln!(
-        "[psi-alt] [SIM enc] {} filtri + {} matrici indici (multi-block): {:.3} ms",
+        "[psi-alt] [SIM enc] {} filters + {} index matrices (multi-block): {:.3} ms",
         u, u, t_sim_enc * 1e3
     );
 
@@ -225,7 +225,7 @@ pub fn run_e2e_pasta_alt(
     let n_groups_b = (n_b + lanes - 1) / lanes;
     let n_groups_a = (n_a + lanes - 1) / lanes;
     eprintln!(
-        "[psi-alt] [groups] lanes={} -> {} gruppi filtro, {} gruppi indici",
+        "[psi-alt] [groups] lanes={} -> {} filter groups, {} index groups",
         lanes, n_groups_b, n_groups_a
     );
 
@@ -267,7 +267,7 @@ pub fn run_e2e_pasta_alt(
         b_bits_all.extend(fhe.decrypt_bits(&ctx, &e_b, (b1 - b0) * t)?);
         t_cmux_sim += t0.elapsed().as_secs_f64();
 
-        eprintln!("[psi-alt] [filtri] gruppo {}/{} ({} blocchi) fatto", g + 1, n_groups_b, b1 - b0);
+        eprintln!("[psi-alt] [filters] group {}/{} ({} blocks) done", g + 1, n_groups_b, b1 - b0);
     }
     b_bits_all.truncate(cfg.n_bits);
 
@@ -291,7 +291,7 @@ pub fn run_e2e_pasta_alt(
         a_bits_all.extend(fhe.decrypt_bits(&ctx, &ct, (b1 - b0) * t)?);
         t_cmux_sim += t0.elapsed().as_secs_f64();
 
-        eprintln!("[psi-alt] [indici] gruppo {}/{} ({} blocchi) fatto", g + 1, n_groups_a, b1 - b0);
+        eprintln!("[psi-alt] [indices] group {}/{} ({} blocks) done", g + 1, n_groups_a, b1 - b0);
     }
     a_bits_all.truncate(idx_bits_total);
 
@@ -314,10 +314,10 @@ pub fn run_e2e_pasta_alt(
     t_cmux_sim += t0.elapsed().as_secs_f64();
 
     eprintln!(
-        "[psi-alt] [transcipher] totale {:.3} s | [eval_and] {:.3} s | [CMUX-sim] decrypt+{} lookup {:.3} s",
+        "[psi-alt] [transcipher] total {:.3} s | [eval_and] {:.3} s | [CMUX-sim] decrypt+{} lookup {:.3} s",
         t_transcipher, t_eval_and, m1 * h, t_cmux_sim
     );
-    
+
     // --- DO_1 decides membership ---
     // An element is in the intersection only if all h lookups return true
     let mut do1_out: Vec<(Vec<u8>, [u8; 32])> = Vec::with_capacity(m1);
