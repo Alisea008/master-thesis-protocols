@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use fhe::bfv::Ciphertext;
+use fhe_traits::Serialize as FheSerialize;
 use zeroize::Zeroize;
 
 use crate::bloom::HashFamilies;
@@ -62,6 +63,9 @@ pub struct E2eResultAlt {
     pub transcipher_s: f64,
     pub eval_and_s: f64,
     pub cmux_sim_s: f64,
+    // Communication (bytes), computed from the sizes of the messages exchanged
+    pub ct_size_bytes: usize,
+    pub comm_total_bytes: usize,
 }
 
 /// Runs the "Alternative" algorithm in multi-block mode: no TEE, S_1
@@ -169,7 +173,7 @@ pub fn run_e2e_pasta_alt(
     }
     let t_sim_enc = t0.elapsed().as_secs_f64();
     eprintln!(
-        "[psi-alt] [SIM enc] {} filters + {} index matrices (multi-block): {:.3} ms",
+        "[psi-alt] [SIM enc] {} filtri + {} matrici indici (multi-block): {:.3} ms",
         u, u, t_sim_enc * 1e3
     );
 
@@ -221,13 +225,15 @@ pub fn run_e2e_pasta_alt(
     let n_groups_b = (n_b + lanes - 1) / lanes;
     let n_groups_a = (n_a + lanes - 1) / lanes;
     eprintln!(
-        "[psi-alt] [groups] lanes={} -> {} filter groups, {} index groups",
+        "[psi-alt] [groups] lanes={} -> {} gruppi filtro, {} gruppi indici",
         lanes, n_groups_b, n_groups_a
     );
 
     let mut t_transcipher = 0.0f64;
     let mut t_eval_and = 0.0f64;
     let mut t_cmux_sim = 0.0f64;
+    // Serialised size of the aggregated filter ciphertexts (sum over groups)
+    let mut ct_size_bytes = 0usize;
 
     // ---- filters: slot-wise AND across DOs, then plaintext bits (simulated CMUX) ----
     let nonce_b = [sigma as u64, 0u64];
@@ -254,13 +260,14 @@ pub fn run_e2e_pasta_alt(
         let e_b = fhe.eval_and_all(&ctx, &cts, n)?;
         t_eval_and += t0.elapsed().as_secs_f64();
         drop(cts);
+        ct_size_bytes += e_b.to_bytes().len();
 
         let t0 = Instant::now();
         // Decrypt the resulting bits for this group
         b_bits_all.extend(fhe.decrypt_bits(&ctx, &e_b, (b1 - b0) * t)?);
         t_cmux_sim += t0.elapsed().as_secs_f64();
 
-        eprintln!("[psi-alt] [filters] group {}/{} ({} blocks) done", g + 1, n_groups_b, b1 - b0);
+        eprintln!("[psi-alt] [filtri] gruppo {}/{} ({} blocchi) fatto", g + 1, n_groups_b, b1 - b0);
     }
     b_bits_all.truncate(cfg.n_bits);
 
@@ -284,7 +291,7 @@ pub fn run_e2e_pasta_alt(
         a_bits_all.extend(fhe.decrypt_bits(&ctx, &ct, (b1 - b0) * t)?);
         t_cmux_sim += t0.elapsed().as_secs_f64();
 
-        eprintln!("[psi-alt] [indices] group {}/{} ({} blocks) done", g + 1, n_groups_a, b1 - b0);
+        eprintln!("[psi-alt] [indici] gruppo {}/{} ({} blocchi) fatto", g + 1, n_groups_a, b1 - b0);
     }
     a_bits_all.truncate(idx_bits_total);
 
@@ -307,7 +314,7 @@ pub fn run_e2e_pasta_alt(
     t_cmux_sim += t0.elapsed().as_secs_f64();
 
     eprintln!(
-        "[psi-alt] [transcipher] total {:.3} s | [eval_and] {:.3} s | [CMUX-sim] decrypt+{} lookups {:.3} s",
+        "[psi-alt] [transcipher] totale {:.3} s | [eval_and] {:.3} s | [CMUX-sim] decrypt+{} lookup {:.3} s",
         t_transcipher, t_eval_and, m1 * h, t_cmux_sim
     );
     
@@ -344,6 +351,18 @@ pub fn run_e2e_pasta_alt(
     let false_positives = found_set.difference(&expected_set).count();
     let false_negatives = expected_set.difference(&found_set).count();
 
+    // --- Communication cost (same accounting as Algorithm 1, no TEE) ---
+    // One OT instance per DO for the filters, plus one for the index matrix of DO_1.
+    // The table R sent by S_1 to DO_1 is NOT counted: the CMUX is simulated.
+    let ot_ctrl = (u - 1) * 32 + 32 + 32 + 32; // DO->TTP + TTP->DO + TTP->S
+    let m_b_len = m_sigmas[0].len(); // filter OT message (bytes)
+    let m_a_len = m_a_sigma.len();   // index OT message (bytes)
+    let comm_total_bytes = n * ot_ctrl
+        + n * u * (m_b_len + 6)
+        + ot_ctrl
+        + u * (m_a_len + 6)
+        + n * ct_size_bytes; // S_a -> S_1 (index ciphertexts are transciphered at S_1)
+
     let total_s = t_run.elapsed().as_secs_f64();
     eprintln!(
         "[psi-alt] === E2E done in {:.3}s | σ={} | n_b={} n_a={} | |exp|={} | |found|={} | FP={} | FN={} ===",
@@ -368,5 +387,7 @@ pub fn run_e2e_pasta_alt(
         transcipher_s: t_transcipher,
         eval_and_s: t_eval_and,
         cmux_sim_s: t_cmux_sim,
+        ct_size_bytes,
+        comm_total_bytes,
     })
 }
