@@ -470,3 +470,28 @@ pub fn count_joint_candidates(
         .filter(|y| ctx.iter().all(|(p, hh, bt)| potential_candidate(p, hh, bt, y, usize::MAX)))
         .count()
 }
+
+/// Elements y in `u1` that snipe `target` simultaneously in ALL given families.
+pub fn joint_candidates(
+    fams: &[BloomFilterParams],
+    u1: Range<usize>,
+    u2: &Range<usize>,
+    target: usize,
+) -> Vec<usize> {
+    let ctx: Vec<(&BloomFilterParams, Vec<Vec<usize>>, BTreeSet<usize>)> = fams
+        .iter()
+        .map(|p| {
+            let hh = hash_hits(p, u2);
+            let bt: BTreeSet<usize> = p
+                .seeds
+                .iter()
+                .map(|s| hash_element(&target, *s) % p.bin_count)
+                .collect();
+            (p, hh, bt)
+        })
+        .collect();
+
+    u1.into_par_iter()
+        .filter(|y| ctx.iter().all(|(p, hh, bt)| potential_candidate(p, hh, bt, y, usize::MAX)))
+        .collect()
+}
