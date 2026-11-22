@@ -6,9 +6,11 @@
 //!
 //! Three attacker strategies are compared:
 //!   * `single_u`     - craft X_1 for family 0 and hope sigma == 0
-//!   * `union`        - union of the U per-family attack sets
-//!   * `same_target`  - attack the SAME element across all families
-//!                     (equivalent to inserting it into one's own set)
+//!   * `split_union`  - union of the U per-family attack sets, budget k/U each
+//!   * `same_target`  - fix the target t* (chosen on family 0) and build X_1
+//!                      from elements y that snipe t* in ALL U families at
+//!                      once (joint candidates), so the attack works
+//!                      whatever sigma is
 
 use std::time::Instant;
 
@@ -18,7 +20,9 @@ use rand::Rng;
 use rayon::prelude::*;
 use structopt::StructOpt;
 
-use bloom_goes_boom::{snipe, BloomFilter, BloomFilterParams, Confusion};
+use bloom_goes_boom::{
+    count_joint_candidates, joint_candidates, snipe, BloomFilter, BloomFilterParams, Confusion,
+};
 
 #[derive(StructOpt, Debug)]
 #[structopt(
@@ -48,13 +52,14 @@ struct Opt {
     #[structopt(short = "u", long, default_value = "1")]
     num_filters: usize,
 
-    /// Attacker strategy: `single_u`, `union`, `same_target`.
+    /// Attacker strategy: `single_u`, `split_union`, `same_target`.
     #[structopt(long, default_value = "single_u")]
     strategy: String,
 
     #[structopt(short, parse(from_occurrences))]
     verbose: u8,
 
+    /// Only print |joint candidates| for j = 1..=U, then exit.
     #[structopt(long)]
     joint_count: bool,
 }
@@ -101,7 +106,7 @@ fn main() {
         println!("% Threads: {}", num_threads);
     }
 
-    // 1. Pre-compute U attack sets, one per hash family.
+    // 1. Pre-compute attack sets (one per family when needed).
     let start = Instant::now();
     let needed = if strategy == "split_union" { u_count } else { 1 };
     let budget = if strategy == "split_union" { (k / u_count).max(1) } else { k };
@@ -115,7 +120,7 @@ fn main() {
     let targets: Vec<usize> = snipes.iter().map(|(_, t)| *t).collect();
 
     if verbose >= 1 {
-        println!("% Pre-computed {} attack sets in {:?}", u_count, start.elapsed());
+        println!("% Pre-computed {} attack sets in {:?}", snipes.len(), start.elapsed());
         for (u, (s, t)) in snipes.iter().enumerate() {
             println!("%   family {}: target = {}, |AS| = {}", u, t, s.len());
         }
@@ -123,28 +128,45 @@ fn main() {
 
     // The element whose membership the attacker is trying to infer.
     let t_star = targets[0];
-        
+
     // Joint-candidate mode: how many y snipe t* in ALL of the first j families?
     if opt.joint_count {
         for j in 1..=u_count {
-            let n = bloom_goes_boom::count_joint_candidates(
-                &families[..j], u1.clone(), &u2, t_star,
-            );
+            let n = count_joint_candidates(&families[..j], u1.clone(), &u2, t_star);
             println!("U={} joint_candidates={}", j, n);
         }
         return;
     }
+
     // 2. Attacker's X_1 depends on the strategy.
     let x1: Vec<usize> = match strategy.as_str() {
-    "single_u" => attack_sets[0].clone(),
-    "split_union" => {
-        let mut v: Vec<usize> = attack_sets.iter().flatten().copied().collect();
-        v.sort_unstable();
-        v.dedup();
-        v
-    }
-    "same_target" => vec![t_star],
-    other => panic!("Unknown strategy: {} (expected single_u|split_union|same_target)", other),
+        "single_u" => attack_sets[0].clone(),
+        "split_union" => {
+            let mut v: Vec<usize> = attack_sets.iter().flatten().copied().collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        }
+        "same_target" => {
+            // Elements y (outside U2) that snipe t* in every family.
+            let mut v = joint_candidates(&families, u1.clone(), &u2, t_star);
+            let found = v.len();
+            v.truncate(k); // respect the budget
+            if verbose >= 1 {
+                println!("% same_target: {} joint candidates, using {}", found, v.len());
+            }
+            if v.is_empty() {
+                eprintln!(
+                    "% WARNING: no joint candidates for U={}, X_1 is empty (advantage will be 0)",
+                    u_count
+                );
+            }
+            v
+        }
+        other => panic!(
+            "Unknown strategy: {} (expected single_u|split_union|same_target)",
+            other
+        ),
     };
     assert!(x1.len() <= k, "X_1 exceeds the budget k");
 
@@ -182,8 +204,8 @@ fn main() {
     let total = c0.merge(c1);
     let (advantage, se) = total.advantage();
     println!(
-        "U={} strategy={} advantage={:.5} se={:.5} adv_sigma0={:.5} adv_sigma_other={:.5} \\\\ % {}",
-        u_count, strategy, advantage, se, adv_s0, adv_other, total
+        "U={} strategy={} |X1|={} advantage={:.5} se={:.5} adv_sigma0={:.5} adv_sigma_other={:.5} \\\\ % {}",
+        u_count, strategy, x1.len(), advantage, se, adv_s0, adv_other, total
     );
 }
 
@@ -221,4 +243,3 @@ fn run_trial(
     acc[class].entries[((intersection as usize) << 1) + has_target as usize] += 1;
     acc
 }
-
